@@ -1,0 +1,98 @@
+using System.Net.Http;
+using Autodesk.AutoCAD.EditorInput;
+using Newtonsoft.Json.Linq;
+namespace SmartValveMatcherEngine;
+using Autodesk.AutoCAD.ApplicationServices;
+
+public static class SmartMarkDataLoader
+{
+    public static Dictionary<(string Facility, string SubFacility), Dictionary<string, string>> LoadSmartMarkMap(Editor ed)
+    {
+        string url = "https://enaibotdevfrappe.inventivebizsol.co.in/api/v2/document/Instrumentation Files?fields=[\"*\"]";
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Clear();
+        client.DefaultRequestHeaders.Add("Authorization", "token cbe182e6b5c60f6:8d7e0ae7bad6198");
+        client.DefaultRequestHeaders.Add("Accept", "application/json");
+
+        try
+        {
+            var response = client.GetAsync(url).Result;
+            response.EnsureSuccessStatusCode();
+
+            var json = response.Content.ReadAsStringAsync().Result;
+            var root = JObject.Parse(json);
+
+            if (!root.TryGetValue("data", out var dataToken) || !dataToken.HasValues)
+            {
+                ed.WriteMessage("\n SmartMark API returned no data.");
+                return new();
+            }
+
+            // Loop through all records and use the first valid one
+            foreach (var item in dataToken)
+            {
+                var rawJson = item["instrumentation_attribute_data"]?.ToString();
+
+                if (!string.IsNullOrWhiteSpace(rawJson))
+                {
+                    ed.WriteMessage($"\n instrumentation_attribute_data found (truncated): {rawJson.Substring(0, Math.Min(300, rawJson.Length))}...");
+                    var parsed = ParseSmartMarkJson(rawJson);
+                    ed.WriteMessage($"\n Loaded SmartMark attributes for {parsed.Count} facility/subfacility pairs.");
+                    return parsed;
+                }
+            }
+
+            ed.WriteMessage("\n No valid instrumentation_attribute_data found.");
+            return new();
+        }
+        catch (Exception ex)
+        {
+            ed.WriteMessage($"\n Failed to fetch SmartMark data: {ex.Message}");
+            return new();
+        }
+    }
+
+    public static Dictionary<(string Facility, string SubFacility), Dictionary<string, string>> ParseSmartMarkJson(string rawJson)
+    {
+        var result = new Dictionary<(string, string), Dictionary<string, string>>();
+
+        try
+        {
+            var root = JObject.Parse(rawJson);
+
+            if (root.TryGetValue("instrumentation_data", out var instrumentationNode))
+                root = (JObject)instrumentationNode;
+
+            foreach (var facilityPair in root)
+            {
+                string facility = facilityPair.Key;
+
+                if (facilityPair.Value is not JObject subFacilities)
+                    continue;
+
+                foreach (var subPair in subFacilities)
+                {
+                    string subFacility = subPair.Key;
+                    var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    if (subPair.Value is JObject attrObj)
+                    {
+                        foreach (var kvp in attrObj)
+                        {
+                            attributes[kvp.Key.Trim()] = kvp.Value?.ToString()?.Trim() ?? "";
+                        }
+                    }
+
+                    result[(facility, subFacility)] = attributes;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Application.DocumentManager.MdiActiveDocument.Editor.WriteMessage($"\n JSON parsing failed: {ex.Message}");
+        }
+
+        return result;
+    }
+}
